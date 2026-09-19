@@ -8,14 +8,7 @@ async fn main() {
     let provider = Arc::new(MockAttendanceProvider::new(Duration::seconds(30)));
     let keys = KeyStore::new([7; 32]);
     let jobs = (0..3)
-        .map(|n| {
-            Job::new(
-                format!("demo-user-{n}"),
-                "session-intent",
-                "check-in",
-                "region:demo",
-            )
-        })
+        .map(|n| Job::new(format!("demo-user-{n}"), "check-in", "region:demo"))
         .collect();
     let results = worker::run_bounded(provider, keys, jobs, 2).await;
     for result in results {

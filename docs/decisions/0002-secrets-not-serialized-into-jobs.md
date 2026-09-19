@@ -16,4 +16,4 @@ Durable queues persist payloads and may expose them to operators, retries, or re
 
 ## Consequences
 
-Retries use current credential state, and rotation does not require rewriting queued jobs. Workers need access to protected runtime state, and a user may fail at execution time even if enqueueing succeeded.
+A host-level retry can use current credential state, and rotation does not require rewriting queued jobs. Workers need access to protected runtime state, and a user may fail at execution time even if enqueueing succeeded.

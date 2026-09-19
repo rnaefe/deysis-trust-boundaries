@@ -16,7 +16,7 @@ The attacker controls their own client, can inspect their own client traffic, ca
 | Device state → backend | Does identity prove presence or only key possession? |
 | Location source → client | Is a location claim independently corroborated? |
 | Challenge → action | Is the challenge scoped, fresh, expiring, and one-time? |
-| Queue → worker | Can durable work omit secrets and survive restart? |
+| Queue → host orchestration | Can durable work omit secrets and be recovered safely? |
 | Worker → provider | Are provider failures distinguishable from success? |
 
 Risk classes include client-reported location, device identity assumptions, weak challenge binding, replay, long-lived credentials, insufficient anomaly detection, and weak auditability. Individual findings are labelled with their evidence level in [findings](findings.md).

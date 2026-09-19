@@ -7,7 +7,6 @@ use uuid::Uuid;
 pub struct Job {
     pub id: Uuid,
     pub user_id: String,
-    pub session_id: String,
     pub action: String,
     pub location_claim: String,
     pub attempts: u32,
@@ -16,14 +15,12 @@ pub struct Job {
 impl Job {
     pub fn new(
         user_id: impl Into<String>,
-        session_id: impl Into<String>,
         action: impl Into<String>,
         location_claim: impl Into<String>,
     ) -> Self {
         Self {
             id: Uuid::new_v4(),
             user_id: user_id.into(),
-            session_id: session_id.into(),
             action: action.into(),
             location_claim: location_claim.into(),
             attempts: 0,
@@ -73,13 +70,19 @@ mod tests {
     use super::*;
     #[test]
     fn jobs_do_not_contain_secrets() {
-        let json = serde_json::to_string(&Job::new(
-            "user-a",
-            "session-a",
-            "check-in",
-            "coarse-region",
-        ))
-        .unwrap();
+        let value = serde_json::to_value(Job::new("user-a", "check-in", "coarse-region")).unwrap();
+        let object = value.as_object().unwrap();
+        let keys = object
+            .keys()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            keys,
+            ["action", "attempts", "id", "location_claim", "user_id"]
+                .into_iter()
+                .collect()
+        );
+        let json = value.to_string();
         assert!(!json.contains("password"));
         assert!(!json.contains("private_key"));
         assert!(!json.contains("bearer"));

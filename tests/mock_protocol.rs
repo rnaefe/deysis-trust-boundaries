@@ -8,9 +8,12 @@ use deysis_trust_boundaries::{
     queue::Job,
     worker,
 };
-use std::sync::{
-    Arc,
-    atomic::{AtomicUsize, Ordering},
+use std::{
+    collections::HashSet,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
 };
 
 #[tokio::test]
@@ -76,7 +79,7 @@ async fn bounded_runner_completes_all_jobs() {
         provider,
         KeyStore::new([3; 32]),
         (0..10)
-            .map(|n| Job::new(format!("u{n}"), "intent", "check-in", "region:demo"))
+            .map(|n| Job::new(format!("u{n}"), "check-in", "region:demo"))
             .collect(),
         2,
     )
@@ -92,13 +95,27 @@ async fn bounded_runner_never_exceeds_configured_concurrency() {
         provider.clone(),
         KeyStore::new([4; 32]),
         (0..20)
-            .map(|n| Job::new(format!("u{n}"), "intent", "check-in", "region:demo"))
+            .map(|n| Job::new(format!("u{n}"), "check-in", "region:demo"))
             .collect(),
         3,
     )
     .await;
     assert!(results.iter().all(Result::is_ok));
     assert!(provider.max.load(Ordering::SeqCst) <= 3);
+    assert_eq!(provider.active.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn provider_failure_is_returned_as_failure() {
+    let provider = MockAttendanceProvider::default();
+    let result = worker::execute(
+        &provider,
+        &KeyStore::new([8; 32]),
+        Job::new("user-a", "check-in", "region:demo"),
+        "",
+    )
+    .await;
+    assert!(result.is_err());
 }
 
 #[tokio::test]
@@ -227,6 +244,7 @@ struct InstrumentedProvider {
     inner: MockAttendanceProvider,
     active: Arc<AtomicUsize>,
     max: Arc<AtomicUsize>,
+    sessions: Arc<Mutex<HashSet<String>>>,
 }
 impl InstrumentedProvider {
     fn new() -> Self {
@@ -234,6 +252,13 @@ impl InstrumentedProvider {
             inner: MockAttendanceProvider::default(),
             active: Arc::new(AtomicUsize::new(0)),
             max: Arc::new(AtomicUsize::new(0)),
+            sessions: Arc::new(Mutex::new(HashSet::new())),
+        }
+    }
+
+    fn finish(&self, session: &str) {
+        if self.sessions.lock().unwrap().remove(session) {
+            self.active.fetch_sub(1, Ordering::SeqCst);
         }
     }
 }
@@ -248,14 +273,27 @@ impl AttendanceProvider for InstrumentedProvider {
         let current = self.active.fetch_add(1, Ordering::SeqCst) + 1;
         self.max.fetch_max(current, Ordering::SeqCst);
         tokio::time::sleep(std::time::Duration::from_millis(2)).await;
-        self.inner.authenticate(user_id, secret).await
+        let result = self.inner.authenticate(user_id, secret).await;
+        match &result {
+            Ok(session) => {
+                self.sessions.lock().unwrap().insert(session.clone());
+            }
+            Err(_) => {
+                self.active.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+        result
     }
     async fn register_device(
         &self,
         session: &str,
         identity: DeviceIdentity,
     ) -> Result<(), deysis_trust_boundaries::provider::ProviderError> {
-        self.inner.register_device(session, identity).await
+        let result = self.inner.register_device(session, identity).await;
+        if result.is_err() {
+            self.finish(session);
+        }
+        result
     }
     async fn request_challenge(
         &self,
@@ -263,9 +301,14 @@ impl AttendanceProvider for InstrumentedProvider {
         device_id: uuid::Uuid,
         action: &str,
     ) -> Result<String, deysis_trust_boundaries::provider::ProviderError> {
-        self.inner
+        let result = self
+            .inner
             .request_challenge(session, device_id, action)
-            .await
+            .await;
+        if result.is_err() {
+            self.finish(session);
+        }
+        result
     }
     async fn submit(
         &self,
@@ -274,8 +317,9 @@ impl AttendanceProvider for InstrumentedProvider {
         deysis_trust_boundaries::provider::ProviderResult,
         deysis_trust_boundaries::provider::ProviderError,
     > {
+        let session = request.session_id.clone();
         let result = self.inner.submit(request).await;
-        self.active.fetch_sub(1, Ordering::SeqCst);
+        self.finish(&session);
         result
     }
 }

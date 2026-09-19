@@ -4,7 +4,7 @@
 
 The provider exposes four conceptual operations through the Rust trait: authenticate, register a device, request a challenge, and submit an action.
 
-The mock challenge is an opaque UUID stored server-side with these bindings: `user_id`, `device_id`, `session_id`, `action`, and `expires_at`. A submission includes those same context values, a coarse location claim, the challenge, and a URL-safe P-256 signature.
+The mock challenge is an opaque UUID stored server-side with these bindings: `user_id`, `device_id`, `session_id`, `action`, and `expires_at`. A submission includes those same context values, a coarse location claim, the challenge, and a URL-safe P-256 signature. The location claim is not stored in the challenge context; it is covered by the signature.
 
 The signed message is the fictional string:
 

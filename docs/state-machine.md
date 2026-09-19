@@ -8,7 +8,7 @@ stateDiagram-v2
     Unauthenticated --> Authenticated: legitimate session created [OBSERVED]
     Authenticated --> DeviceReady: device identity available [OBSERVED]
     DeviceReady --> ChallengeIssued: challenge requested [OBSERVED / PUBLIC-MOCK]
-    ChallengeIssued --> SignedAction: context signed [PUBLIC-MOCK]
+    ChallengeIssued --> SignedAction: action context signed; location included [PUBLIC-MOCK]
     SignedAction --> Accepted: valid, fresh, bound [PUBLIC-MOCK]
     SignedAction --> Rejected: invalid, expired, replayed, or mismatched [PUBLIC-MOCK]
     ChallengeIssued --> Rejected: expiry [PUBLIC-MOCK]

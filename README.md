@@ -23,14 +23,15 @@ The interesting engineering problem was not automating attendance. It was recons
 ```mermaid
 flowchart TD
   C[CLI or future client] --> A[Application service]
-  A --> Q[(PostgreSQL durable queue)]
-  Q --> W[Bounded Tokio workers]
+  A --> Q[(PostgreSQL persistence boundary)]
+  Q --> O[Host/application orchestration]
+  O --> W[Bounded Tokio execution]
   W --> P[AttendanceProvider trait]
   P --> M[MockAttendanceProvider]
   W --> K[Encrypted device-key store]
 ```
 
-The mock provider has its own protocol and binds a short-lived, one-time challenge to the user, device, session, action, and location claim. It is intentionally not wire-compatible with DEYSİS.
+The mock provider has its own protocol. Its short-lived, one-time challenge is bound server-side to the user, device, session, and action; the signed request additionally covers the location claim. It is intentionally not wire-compatible with DEYSİS.
 
 ## Evidence at a glance
 
@@ -52,7 +53,7 @@ The classifications and their evidence basis are explained in [the evidence mode
 | Replay resistance | Single-use challenge | Replay test |
 | Expiry | Challenge TTL | Expiry test |
 | User/device/session/action binding | Server-side challenge context | Binding tests |
-| Action integrity | Signature covers action context | Signature tests |
+| Action integrity | Signature covers action context and location claim | Signature tests |
 | Secret isolation | Identifier-only job payload | Queue payload test |
 | Bounded work | Tokio semaphore | Concurrency invariant test |
 
@@ -86,7 +87,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 
 Or run the same local gates with `just verify`.
 
-PostgreSQL is included for the durable queue boundary and local experimentation. The default demo does not contact any external service.
+PostgreSQL demonstrates the durable persistence boundary. `run_bounded` demonstrates bounded execution independently; the sample does not wire a persistent dequeue, lease, retry, or crash-recovery loop. The default demo does not contact any external service.
 
 ## Positioning
 
