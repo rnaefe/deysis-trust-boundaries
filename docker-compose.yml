@@ -1,0 +1,13 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    ports: ["127.0.0.1:5433:5432"]
+    environment:
+      POSTGRES_DB: trust_demo
+      POSTGRES_USER: trust_demo
+      POSTGRES_PASSWORD: change-me
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/001-schema.sql:ro
+volumes:
+  postgres_data:
