@@ -15,10 +15,10 @@ This repository separates what was seen from what was designed for the public re
 
 | Concept | Classification | Evidence basis | Public treatment |
 | --- | --- | --- | --- |
-| Persistent device identity | Observed | Client lifecycle analysis | Reproduced generically with P-256 |
-| Client-provided location claim | Observed | Action-flow analysis | Represented as a fictional coarse claim |
-| Authentication/session lifecycle | Observed | Legitimate login and action sequencing | Reproduced behind a trait |
-| Challenge/nonce concept | Observed | Action-flow analysis | Reproduced with stricter mock binding; location is signed separately |
+| Persistent device identity | Observed | [OBS-DEV-01](research-log.md#obs-dev-01--device-lifecycle) | Reproduced generically with P-256 |
+| Client-provided location claim | Observed | [OBS-LOC-01](research-log.md#obs-loc-01--location-claim-lifecycle) | Represented as a fictional coarse claim |
+| Authentication/session lifecycle | Observed | [OBS-SES-01](research-log.md#obs-ses-01--session-lifecycle) | Reproduced behind a trait |
+| Challenge/nonce concept | Observed | [OBS-CHL-01](research-log.md#obs-chl-01--challenge-lifecycle) | Reproduced with stricter mock binding; location is signed separately |
 | Exact server validation | Unknown | Backend was not available for inspection | No claim |
 | Replay impact in production | Hypothetical | Depends on server-side binding and consumption | Discussed defensively only |
 | Replay-safe challenge binding | Public mock | Independent defensive design | Fully tested |

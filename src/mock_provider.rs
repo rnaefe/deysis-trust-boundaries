@@ -1,6 +1,8 @@
 use crate::{
     crypto::{DeviceCredential, DeviceIdentity},
-    provider::{ActionRequest, AttendanceProvider, ProviderError, ProviderResult},
+    provider::{
+        ActionRequest, AttendanceProvider, ProviderError, ProviderResult, action_signature_payload,
+    },
 };
 use async_trait::async_trait;
 use chrono::{Duration, Utc};
@@ -17,10 +19,16 @@ pub struct MockAttendanceProvider {
 }
 struct State {
     sessions: HashMap<String, String>,
-    devices: HashMap<Uuid, DeviceIdentity>,
+    devices: HashMap<Uuid, RegisteredDevice>,
+    device_ids_by_public_key: HashMap<Vec<u8>, Uuid>,
     challenges: HashMap<String, Challenge>,
     consumed: HashSet<String>,
 }
+struct RegisteredDevice {
+    owner_user_id: String,
+    identity: DeviceIdentity,
+}
+#[derive(Clone)]
 struct Challenge {
     user_id: String,
     device_id: Uuid,
@@ -40,6 +48,7 @@ impl MockAttendanceProvider {
             state: Arc::new(Mutex::new(State {
                 sessions: HashMap::new(),
                 devices: HashMap::new(),
+                device_ids_by_public_key: HashMap::new(),
                 challenges: HashMap::new(),
                 consumed: HashSet::new(),
             })),
@@ -75,14 +84,40 @@ impl AttendanceProvider for MockAttendanceProvider {
         session: &str,
         identity: DeviceIdentity,
     ) -> Result<(), ProviderError> {
-        if !self.state.lock().unwrap().sessions.contains_key(session) {
-            return Err(ProviderError::Authentication);
+        DeviceCredential::validate_identity(&identity).map_err(|_| ProviderError::Device)?;
+        let mut state = self.state.lock().unwrap();
+        let user_id = state
+            .sessions
+            .get(session)
+            .cloned()
+            .ok_or(ProviderError::Authentication)?;
+
+        if let Some(existing) = state.devices.get(&identity.id) {
+            return if existing.owner_user_id == user_id
+                && existing.identity.public_key == identity.public_key
+            {
+                Ok(())
+            } else {
+                Err(ProviderError::Device)
+            };
         }
-        self.state
-            .lock()
-            .unwrap()
-            .devices
-            .insert(identity.id, identity);
+        if state
+            .device_ids_by_public_key
+            .get(&identity.public_key)
+            .is_some_and(|existing_id| *existing_id != identity.id)
+        {
+            return Err(ProviderError::Device);
+        }
+        state
+            .device_ids_by_public_key
+            .insert(identity.public_key.clone(), identity.id);
+        state.devices.insert(
+            identity.id,
+            RegisteredDevice {
+                owner_user_id: user_id,
+                identity,
+            },
+        );
         Ok(())
     }
     async fn request_challenge(
@@ -97,7 +132,8 @@ impl AttendanceProvider for MockAttendanceProvider {
             .get(session)
             .cloned()
             .ok_or(ProviderError::Authentication)?;
-        if !state.devices.contains_key(&device_id) {
+        let device = state.devices.get(&device_id).ok_or(ProviderError::Device)?;
+        if device.owner_user_id != user_id {
             return Err(ProviderError::Device);
         }
         let id = Uuid::new_v4().to_string();
@@ -122,7 +158,8 @@ impl AttendanceProvider for MockAttendanceProvider {
         }
         let c = state
             .challenges
-            .remove(&request.challenge)
+            .get(&request.challenge)
+            .cloned()
             .ok_or_else(|| ProviderError::Challenge("unknown challenge".into()))?;
         if c.expires_at <= Utc::now() {
             return Err(ProviderError::Challenge("challenge expired".into()));
@@ -134,16 +171,25 @@ impl AttendanceProvider for MockAttendanceProvider {
         {
             return Err(ProviderError::Challenge("binding mismatch".into()));
         }
-        let identity = state
+        if state.sessions.get(&request.session_id) != Some(&request.user_id) {
+            return Err(ProviderError::Authentication);
+        }
+        let device = state
             .devices
             .get(&request.device_id)
             .ok_or(ProviderError::Device)?;
-        let message = format!(
-            "{}|{}|{}|{}",
-            request.challenge, request.session_id, request.action, request.location_claim
-        );
-        DeviceCredential::verify(identity, message.as_bytes(), &request.signature)
-            .map_err(|_| ProviderError::Request("invalid signature".into()))?;
+        if device.owner_user_id != request.user_id {
+            return Err(ProviderError::Device);
+        }
+        DeviceCredential::verify(
+            &device.identity,
+            &action_signature_payload(&request),
+            &request.signature,
+        )
+        .map_err(|_| ProviderError::Request("invalid signature".into()))?;
+        // The mutex makes validation and consumption one atomic state transition.
+        // Invalid attempts leave the challenge available to its legitimate holder.
+        state.challenges.remove(&request.challenge);
         state.consumed.insert(request.challenge);
         Ok(ProviderResult {
             receipt: format!("mock-receipt-{}", Uuid::new_v4()),

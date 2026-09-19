@@ -24,14 +24,14 @@ The interesting engineering problem was not automating attendance. It was recons
 flowchart TD
   C[CLI or future client] --> A[Application service]
   A --> Q[(PostgreSQL persistence boundary)]
-  Q --> O[Host/application orchestration]
+  Q --> O[Transactional claim, lease, retry]
   O --> W[Bounded Tokio execution]
   W --> P[AttendanceProvider trait]
   P --> M[MockAttendanceProvider]
-  W --> K[Encrypted device-key store]
+  W --> K[Process-local encrypted key store]
 ```
 
-The mock provider has its own protocol. Its short-lived, one-time challenge is bound server-side to the user, device, session, and action; the signed request additionally covers the location claim. It is intentionally not wire-compatible with DEYSİS.
+The mock provider has its own protocol. Device enrollment binds one validated public key to one device ID and owning user. Its short-lived, one-time challenge is bound server-side to the user, device, session, and action. A versioned, length-prefixed signature payload covers that entire context plus the location claim. Challenges are consumed atomically only after validation succeeds. It is intentionally not wire-compatible with DEYSİS.
 
 ## Evidence at a glance
 
@@ -52,22 +52,26 @@ The classifications and their evidence basis are explained in [the evidence mode
 | --- | --- | --- |
 | Replay resistance | Single-use challenge | Replay test |
 | Expiry | Challenge TTL | Expiry test |
-| User/device/session/action binding | Server-side challenge context | Binding tests |
-| Action integrity | Signature covers action context and location claim | Signature tests |
+| Device ownership | Immutable user/device/key enrollment | Enrollment tests |
+| User/device/session/action binding | Server-side challenge context | Independent binding tests |
+| Action integrity | Versioned, canonical signature payload | Ambiguity and mutation tests |
+| Failed-attempt safety | Consume only after full verification | Invalid-attempt tests |
 | Secret isolation | Identifier-only job payload | Queue payload test |
 | Bounded work | Tokio semaphore | Concurrency invariant test |
+| Durable work | Claim/lease/retry/dead-letter state machine | PostgreSQL integration tests |
 
 ## Repository guide
 
 - [Architecture](docs/architecture.md) — components and trust boundaries
 - [Methodology](docs/methodology.md) — how the analysis was performed
 - [Evidence model](docs/evidence-model.md) — observed, inferred, hypothetical, mock, and withheld
+- [Sanitized evidence ledger](docs/research-log.md) — trace IDs, field lifecycle, and public audit limits
 - [State machine](docs/state-machine.md) — sanitized protocol lifecycle
 - [Threat model](docs/threat-model.md) — assets, actors, and abuse cases
 - [Findings](docs/findings.md) — evidence-weighted security observations
 - [Mitigations](docs/mitigations.md) — defensive design options and trade-offs
 - [Mock protocol](docs/mock-protocol.md) — the fictional protocol implemented here
-- [Design decisions](docs/decisions/) — four decisions that shape the reproduction
+- [Design decisions](docs/decisions/) — five decisions that shape the reproduction
 - [Limitations](docs/limitations.md) — what cannot be concluded externally
 - [Responsible disclosure](docs/responsible-disclosure.md)
 
@@ -81,13 +85,15 @@ Requires Rust 1.97+.
 
 ```sh
 cargo run --bin trust-boundaries-demo
-cargo test
-cargo clippy --all-targets --all-features -- -D warnings
+cargo test --locked
+cargo clippy --locked --all-targets --all-features -- -D warnings
 ```
 
 Or run the same local gates with `just verify`.
 
-PostgreSQL demonstrates the durable persistence boundary. `run_bounded` demonstrates bounded execution independently; the sample does not wire a persistent dequeue, lease, retry, or crash-recovery loop. The default demo does not contact any external service.
+PostgreSQL implements idempotent enqueue, `FOR UPDATE SKIP LOCKED` claims, owner-specific leases, exponential retry, terminal failure, and expired-lease recovery. `run_queue_once` connects that state machine to provider execution; `run_bounded` demonstrates the separate in-process concurrency bound. PostgreSQL integration tests run when `TEST_DATABASE_URL` points to an exact loopback host. The default demo does not contact any external service.
+
+The queue provides **at-least-once**, not exactly-once, execution. A worker can complete an external action and crash before settling its row; a real provider integration therefore still needs an idempotency key or reconciliation strategy.
 
 ## Positioning
 

@@ -78,7 +78,7 @@ Keep those concepts separate. Consider attestation only as one layer, with expli
 
 ### Observation
 
-The analysis identified challenge-like state in the action lifecycle. The public implementation binds its invented challenge server-side to user, device, session, action, and expiry. The signed request additionally covers the location claim.
+The analysis identified challenge-like state in the action lifecycle. The public implementation binds its invented challenge server-side to user, device, session, action, and expiry. Its versioned, length-prefixed signature payload covers that complete request context plus the location claim.
 
 ### Interpretation
 

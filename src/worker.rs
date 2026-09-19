@@ -1,12 +1,33 @@
 use crate::{
     crypto::KeyStore,
-    provider::{ActionRequest, AttendanceProvider, ProviderError, ProviderResult},
-    queue::Job,
+    provider::{
+        ActionRequest, AttendanceProvider, ProviderError, ProviderResult, action_signature_payload,
+    },
+    queue::{Job, PgQueue, QueueError, RetryOutcome},
 };
 use std::sync::Arc;
+use thiserror::Error;
 use tokio::sync::Semaphore;
 
 pub const DEFAULT_CONCURRENCY: usize = 4;
+
+#[derive(Debug, Error)]
+pub enum WorkerError {
+    #[error("worker concurrency must be greater than zero")]
+    ZeroConcurrency,
+    #[error("worker task failed: {0}")]
+    Join(#[from] tokio::task::JoinError),
+    #[error(transparent)]
+    Queue(#[from] QueueError),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QueueRunOutcome {
+    Idle,
+    Completed,
+    Requeued,
+    FailedPermanently,
+}
 
 pub async fn execute<P: AttendanceProvider>(
     provider: &P,
@@ -14,31 +35,30 @@ pub async fn execute<P: AttendanceProvider>(
     job: Job,
     identity_secret: &str,
 ) -> Result<ProviderResult, ProviderError> {
-    let (credential, _) = keys
+    let (generated, _) = keys
         .generate()
         .map_err(|_| ProviderError::Request("credential setup failed".into()))?;
+    let identity = generated.identity.clone();
+    drop(generated);
     let session = provider.authenticate(&job.user_id, identity_secret).await?;
-    provider
-        .register_device(&session, credential.identity.clone())
-        .await?;
+    provider.register_device(&session, identity.clone()).await?;
     let challenge = provider
-        .request_challenge(&session, credential.identity.id, &job.action)
+        .request_challenge(&session, identity.id, &job.action)
         .await?;
-    let message = format!(
-        "{}|{}|{}|{}",
-        challenge, session, job.action, job.location_claim
-    );
-    provider
-        .submit(ActionRequest {
-            user_id: job.user_id,
-            device_id: credential.identity.id,
-            session_id: session,
-            action: job.action,
-            location_claim: job.location_claim,
-            challenge,
-            signature: credential.sign(message.as_bytes()),
-        })
-        .await
+    let mut request = ActionRequest {
+        user_id: job.user_id,
+        device_id: identity.id,
+        session_id: session,
+        action: job.action,
+        location_claim: job.location_claim,
+        challenge,
+        signature: String::new(),
+    };
+    let credential = keys
+        .load(identity.id)
+        .map_err(|_| ProviderError::Request("credential lookup failed".into()))?;
+    request.signature = credential.sign(&action_signature_payload(&request));
+    provider.submit(request).await
 }
 
 pub async fn run_bounded<P: AttendanceProvider + 'static>(
@@ -46,7 +66,10 @@ pub async fn run_bounded<P: AttendanceProvider + 'static>(
     keys: KeyStore,
     jobs: Vec<Job>,
     concurrency: usize,
-) -> Vec<Result<ProviderResult, ProviderError>> {
+) -> Result<Vec<Result<ProviderResult, ProviderError>>, WorkerError> {
+    if concurrency == 0 {
+        return Err(WorkerError::ZeroConcurrency);
+    }
     let permits = Arc::new(Semaphore::new(concurrency));
     let mut handles = Vec::new();
     for job in jobs {
@@ -60,7 +83,31 @@ pub async fn run_bounded<P: AttendanceProvider + 'static>(
     }
     let mut out = Vec::new();
     for h in handles {
-        out.push(h.await.expect("worker task panicked"));
+        out.push(h.await?);
     }
-    out
+    Ok(out)
+}
+
+/// Claims and settles one durable queue item. Provider failures follow the queue's
+/// retry/dead-letter policy, while a successful provider action is completed only
+/// while this worker still owns the lease.
+pub async fn run_queue_once<P: AttendanceProvider>(
+    provider: &P,
+    keys: &KeyStore,
+    queue: &PgQueue,
+    identity_secret: &str,
+) -> Result<QueueRunOutcome, WorkerError> {
+    let Some(claim) = queue.claim_next().await? else {
+        return Ok(QueueRunOutcome::Idle);
+    };
+    match execute(provider, keys, claim.job.clone(), identity_secret).await {
+        Ok(_) => {
+            queue.complete(&claim).await?;
+            Ok(QueueRunOutcome::Completed)
+        }
+        Err(error) => match queue.retry(&claim, &error.to_string()).await? {
+            RetryOutcome::Requeued => Ok(QueueRunOutcome::Requeued),
+            RetryOutcome::FailedPermanently => Ok(QueueRunOutcome::FailedPermanently),
+        },
+    }
 }

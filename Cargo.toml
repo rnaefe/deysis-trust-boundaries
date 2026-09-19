@@ -2,6 +2,7 @@
 name = "deysis-trust-boundaries"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.97"
 license = "MIT"
 description = "A defensive case study of attendance-system trust boundaries using an incompatible mock protocol."
 
@@ -27,6 +28,7 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "sync"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 uuid = { version = "1", features = ["v4", "serde"] }
+url = "2"
 
 [dev-dependencies]
 tempfile = "3"

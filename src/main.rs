@@ -10,7 +10,9 @@ async fn main() {
     let jobs = (0..3)
         .map(|n| Job::new(format!("demo-user-{n}"), "check-in", "region:demo"))
         .collect();
-    let results = worker::run_bounded(provider, keys, jobs, 2).await;
+    let results = worker::run_bounded(provider, keys, jobs, 2)
+        .await
+        .expect("demo worker configuration is valid");
     for result in results {
         println!(
             "{}",

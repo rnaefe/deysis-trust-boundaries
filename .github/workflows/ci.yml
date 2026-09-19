@@ -3,11 +3,27 @@ on: [push, pull_request]
 jobs:
   rust:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: trust_demo
+          POSTGRES_USER: trust_demo
+          POSTGRES_PASSWORD: trust_demo
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U trust_demo -d trust_demo"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      TEST_DATABASE_URL: postgres://trust_demo:trust_demo@127.0.0.1:5432/trust_demo
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.0
         with:
           components: rustfmt, clippy
       - run: cargo fmt --check
-      - run: cargo test --all-targets
-      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo test --locked --all-targets
+      - run: cargo clippy --locked --all-targets --all-features -- -D warnings

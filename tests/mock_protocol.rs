@@ -2,9 +2,10 @@ use async_trait::async_trait;
 use chrono::Duration;
 use deysis_trust_boundaries::crypto::{DeviceCredential, DeviceIdentity};
 use deysis_trust_boundaries::{
+    action_signature_payload,
     crypto::KeyStore,
     mock_provider::MockAttendanceProvider,
-    provider::{ActionRequest, AttendanceProvider},
+    provider::{ActionRequest, AttendanceProvider, ProviderError},
     queue::Job,
     worker,
 };
@@ -15,61 +16,207 @@ use std::{
         atomic::{AtomicUsize, Ordering},
     },
 };
+use uuid::Uuid;
 
 #[tokio::test]
 async fn valid_flow_accepts_and_replay_is_rejected() {
     let provider = MockAttendanceProvider::default();
     let keys = KeyStore::new([1; 32]);
-    let (credential, _) = keys.generate().unwrap();
-    let session = provider.authenticate("user-a", "secret").await.unwrap();
-    provider
-        .register_device(&session, credential.identity.clone())
-        .await
-        .unwrap();
-    let challenge = provider
-        .request_challenge(&session, credential.identity.id, "check-in")
-        .await
-        .unwrap();
-    let message = format!("{challenge}|{session}|check-in|region:demo");
-    let request = ActionRequest {
-        user_id: "user-a".into(),
-        device_id: credential.identity.id,
-        session_id: session.clone(),
-        action: "check-in".into(),
-        location_claim: "region:demo".into(),
-        challenge: challenge.clone(),
-        signature: credential.sign(message.as_bytes()),
-    };
+    let (credential, session, challenge, location) =
+        issue(&provider, &keys, "user-a", "check-in").await;
+    let request = signed_request(
+        &credential,
+        "user-a",
+        session,
+        "check-in",
+        location,
+        challenge,
+    );
     assert!(provider.submit(request.clone()).await.is_ok());
-    assert!(provider.submit(request).await.is_err());
+    assert!(matches!(
+        provider.submit(request).await,
+        Err(ProviderError::Challenge(message)) if message == "challenge already consumed"
+    ));
 }
 
 #[tokio::test]
-async fn expired_challenge_and_binding_mismatch_fail() {
+async fn expired_challenge_is_rejected() {
     let provider = MockAttendanceProvider::new(Duration::milliseconds(1));
     let keys = KeyStore::new([2; 32]);
-    let (credential, _) = keys.generate().unwrap();
-    let session = provider.authenticate("user-a", "secret").await.unwrap();
-    provider
-        .register_device(&session, credential.identity.clone())
-        .await
-        .unwrap();
-    let challenge = provider
-        .request_challenge(&session, credential.identity.id, "check-in")
-        .await
-        .unwrap();
+    let (credential, session, challenge, location) =
+        issue(&provider, &keys, "user-a", "check-in").await;
     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    let message = format!("{challenge}|{session}|check-in|region:demo");
-    let request = ActionRequest {
-        user_id: "user-b".into(),
-        device_id: credential.identity.id,
-        session_id: session,
-        action: "check-in".into(),
-        location_claim: "region:demo".into(),
+    let request = signed_request(
+        &credential,
+        "user-a",
+        session,
+        "check-in",
+        location,
         challenge,
-        signature: credential.sign(message.as_bytes()),
-    };
-    assert!(provider.submit(request).await.is_err());
+    );
+    assert!(matches!(
+        provider.submit(request).await,
+        Err(ProviderError::Challenge(message)) if message == "challenge expired"
+    ));
+}
+
+#[tokio::test]
+async fn wrong_user_is_rejected_without_consuming_challenge() {
+    assert_binding_mutation_rejected(|request| request.user_id = "user-b".into()).await;
+}
+
+#[tokio::test]
+async fn wrong_session_is_rejected_without_consuming_challenge() {
+    assert_binding_mutation_rejected(|request| request.session_id = "other-session".into()).await;
+}
+
+#[tokio::test]
+async fn wrong_device_is_rejected_without_consuming_challenge() {
+    assert_binding_mutation_rejected(|request| request.device_id = Uuid::new_v4()).await;
+}
+
+#[tokio::test]
+async fn wrong_action_is_rejected_without_consuming_challenge() {
+    assert_binding_mutation_rejected(|request| request.action = "check-out".into()).await;
+}
+
+#[tokio::test]
+async fn modified_location_and_malformed_signature_do_not_consume_challenge() {
+    for mutation in ["location", "signature"] {
+        let provider = MockAttendanceProvider::default();
+        let keys = KeyStore::new([3; 32]);
+        let (credential, session, challenge, location) =
+            issue(&provider, &keys, "user-a", "check-in").await;
+        let valid = signed_request(
+            &credential,
+            "user-a",
+            session,
+            "check-in",
+            location,
+            challenge,
+        );
+        let mut invalid = valid.clone();
+        if mutation == "location" {
+            invalid.location_claim = "region:changed".into();
+        } else {
+            invalid.signature = "not-a-signature".into();
+        }
+        assert!(matches!(
+            provider.submit(invalid).await,
+            Err(ProviderError::Request(message)) if message == "invalid signature"
+        ));
+        assert!(provider.submit(valid).await.is_ok());
+    }
+}
+
+#[tokio::test]
+async fn device_registration_enforces_owner_id_and_key_uniqueness() {
+    let provider = MockAttendanceProvider::default();
+    let keys = KeyStore::new([4; 32]);
+    let (first, _) = keys.generate().unwrap();
+    let (second, _) = keys.generate().unwrap();
+    let session_a = provider.authenticate("user-a", "secret").await.unwrap();
+    let session_b = provider.authenticate("user-b", "secret").await.unwrap();
+
+    provider
+        .register_device(&session_a, first.identity.clone())
+        .await
+        .unwrap();
+    // Exact retries are idempotent; neither id nor key can be rebound.
+    provider
+        .register_device(&session_a, first.identity.clone())
+        .await
+        .unwrap();
+    assert!(
+        provider
+            .register_device(&session_b, first.identity.clone())
+            .await
+            .is_err()
+    );
+    assert!(
+        provider
+            .register_device(
+                &session_a,
+                DeviceIdentity {
+                    id: first.identity.id,
+                    public_key: second.identity.public_key.clone(),
+                },
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        provider
+            .register_device(
+                &session_a,
+                DeviceIdentity {
+                    id: Uuid::new_v4(),
+                    public_key: first.identity.public_key.clone(),
+                },
+            )
+            .await
+            .is_err()
+    );
+    assert!(
+        provider
+            .request_challenge(&session_b, first.identity.id, "check-in")
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn malformed_public_key_is_rejected_at_enrollment() {
+    let provider = MockAttendanceProvider::default();
+    let session = provider.authenticate("user-a", "secret").await.unwrap();
+    assert!(
+        provider
+            .register_device(
+                &session,
+                DeviceIdentity {
+                    id: Uuid::new_v4(),
+                    public_key: vec![1, 2, 3],
+                },
+            )
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn unregistered_device_cannot_request_a_challenge() {
+    let provider = MockAttendanceProvider::default();
+    let session = provider.authenticate("user-a", "secret").await.unwrap();
+    assert!(matches!(
+        provider
+            .request_challenge(&session, Uuid::new_v4(), "check-in")
+            .await,
+        Err(ProviderError::Device)
+    ));
+}
+
+#[tokio::test]
+async fn simultaneous_submissions_have_exactly_one_winner() {
+    let provider = MockAttendanceProvider::default();
+    let keys = KeyStore::new([5; 32]);
+    let (credential, session, challenge, location) =
+        issue(&provider, &keys, "user-a", "check-in").await;
+    let request = signed_request(
+        &credential,
+        "user-a",
+        session,
+        "check-in",
+        location,
+        challenge,
+    );
+    let (left, right) = tokio::join!(provider.submit(request.clone()), provider.submit(request));
+    assert_eq!(
+        [left.is_ok(), right.is_ok()]
+            .into_iter()
+            .filter(|ok| *ok)
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -77,15 +224,28 @@ async fn bounded_runner_completes_all_jobs() {
     let provider = Arc::new(MockAttendanceProvider::default());
     let results = worker::run_bounded(
         provider,
-        KeyStore::new([3; 32]),
+        KeyStore::new([6; 32]),
         (0..10)
             .map(|n| Job::new(format!("u{n}"), "check-in", "region:demo"))
             .collect(),
         2,
     )
-    .await;
+    .await
+    .unwrap();
     assert_eq!(results.len(), 10);
     assert!(results.iter().all(Result::is_ok));
+}
+
+#[tokio::test]
+async fn bounded_runner_rejects_zero_concurrency() {
+    let result = worker::run_bounded(
+        Arc::new(MockAttendanceProvider::default()),
+        KeyStore::new([7; 32]),
+        vec![Job::new("user-a", "check-in", "region:demo")],
+        0,
+    )
+    .await;
+    assert!(matches!(result, Err(worker::WorkerError::ZeroConcurrency)));
 }
 
 #[tokio::test]
@@ -93,13 +253,14 @@ async fn bounded_runner_never_exceeds_configured_concurrency() {
     let provider = Arc::new(InstrumentedProvider::new());
     let results = worker::run_bounded(
         provider.clone(),
-        KeyStore::new([4; 32]),
+        KeyStore::new([8; 32]),
         (0..20)
             .map(|n| Job::new(format!("u{n}"), "check-in", "region:demo"))
             .collect(),
         3,
     )
-    .await;
+    .await
+    .unwrap();
     assert!(results.iter().all(Result::is_ok));
     assert!(provider.max.load(Ordering::SeqCst) <= 3);
     assert_eq!(provider.active.load(Ordering::SeqCst), 0);
@@ -107,117 +268,57 @@ async fn bounded_runner_never_exceeds_configured_concurrency() {
 
 #[tokio::test]
 async fn provider_failure_is_returned_as_failure() {
-    let provider = MockAttendanceProvider::default();
     let result = worker::execute(
-        &provider,
-        &KeyStore::new([8; 32]),
+        &MockAttendanceProvider::default(),
+        &KeyStore::new([9; 32]),
         Job::new("user-a", "check-in", "region:demo"),
         "",
     )
     .await;
-    assert!(result.is_err());
+    assert!(matches!(result, Err(ProviderError::Authentication)));
 }
 
-#[tokio::test]
-async fn signature_and_context_mutations_are_rejected() {
+async fn assert_binding_mutation_rejected(mutate: impl FnOnce(&mut ActionRequest)) {
     let provider = MockAttendanceProvider::default();
-    let keys = KeyStore::new([5; 32]);
+    let keys = KeyStore::new([10; 32]);
     let (credential, session, challenge, location) =
         issue(&provider, &keys, "user-a", "check-in").await;
-    let message = format!("{challenge}|{session}|check-in|{location}");
-    let mut request = ActionRequest {
-        user_id: "user-a".into(),
-        device_id: credential.identity.id,
-        session_id: session.clone(),
-        action: "check-in".into(),
-        location_claim: location.clone(),
-        challenge: challenge.clone(),
-        signature: credential.sign(message.as_bytes()),
-    };
-    request.location_claim = "region:changed".into();
-    assert!(provider.submit(request).await.is_err());
-
-    let (credential, session, challenge, location) =
-        issue(&provider, &keys, "user-a", "check-in").await;
-    let message = format!("{challenge}|{session}|check-in|{location}");
-    let mut request = ActionRequest {
-        user_id: "user-a".into(),
-        device_id: credential.identity.id,
-        session_id: session,
-        action: "check-in".into(),
-        location_claim: location,
+    let valid = signed_request(
+        &credential,
+        "user-a",
+        session,
+        "check-in",
+        location,
         challenge,
-        signature: credential.sign(message.as_bytes()),
-    };
-    request.signature = "not-a-signature".into();
-    assert!(provider.submit(request).await.is_err());
+    );
+    let mut invalid = valid.clone();
+    mutate(&mut invalid);
+    assert!(matches!(
+        provider.submit(invalid).await,
+        Err(ProviderError::Challenge(message)) if message == "binding mismatch"
+    ));
+    assert!(provider.submit(valid).await.is_ok());
 }
 
-#[tokio::test]
-async fn wrong_device_session_action_and_unregistered_device_fail() {
-    let provider = MockAttendanceProvider::default();
-    let keys = KeyStore::new([6; 32]);
-    let (_credential, session, challenge, location) =
-        issue(&provider, &keys, "user-a", "check-in").await;
-    let (other, _, _, _) = issue(&provider, &keys, "user-a", "check-in").await;
-    let message = format!("{challenge}|{session}|check-in|{location}");
-    let request = ActionRequest {
-        user_id: "user-a".into(),
-        device_id: other.identity.id,
-        session_id: session.clone(),
-        action: "check-in".into(),
-        location_claim: location.clone(),
-        challenge,
-        signature: other.sign(message.as_bytes()),
-    };
-    assert!(provider.submit(request).await.is_err());
-
-    let (credential, _session, challenge, location) =
-        issue(&provider, &keys, "user-a", "check-in").await;
-    let other_session = provider.authenticate("user-a", "secret").await.unwrap();
-    let message = format!("{challenge}|{other_session}|check-in|{location}");
-    let request = ActionRequest {
-        user_id: "user-a".into(),
+fn signed_request(
+    credential: &DeviceCredential,
+    user_id: &str,
+    session_id: String,
+    action: &str,
+    location_claim: String,
+    challenge: String,
+) -> ActionRequest {
+    let mut request = ActionRequest {
+        user_id: user_id.into(),
         device_id: credential.identity.id,
-        session_id: other_session,
-        action: "check-in".into(),
-        location_claim: location,
+        session_id,
+        action: action.into(),
+        location_claim,
         challenge,
-        signature: credential.sign(message.as_bytes()),
+        signature: String::new(),
     };
-    assert!(provider.submit(request).await.is_err());
-
-    let (credential, session, challenge, location) =
-        issue(&provider, &keys, "user-a", "check-in").await;
-    let message = format!("{challenge}|{session}|other-action|{location}");
-    let request = ActionRequest {
-        user_id: "user-a".into(),
-        device_id: credential.identity.id,
-        session_id: session,
-        action: "other-action".into(),
-        location_claim: location,
-        challenge,
-        signature: credential.sign(message.as_bytes()),
-    };
-    assert!(provider.submit(request).await.is_err());
-
-    let (credential, session, challenge, location) =
-        issue(&provider, &keys, "user-a", "check-in").await;
-    let unregistered = DeviceIdentity {
-        id: uuid::Uuid::new_v4(),
-        public_key: credential.identity.public_key.clone(),
-    };
-    let message = format!("{challenge}|{session}|check-in|{location}");
-    let request = ActionRequest {
-        user_id: "user-a".into(),
-        device_id: unregistered.id,
-        session_id: session,
-        action: "check-in".into(),
-        location_claim: location,
-        challenge,
-        signature: credential.sign(message.as_bytes()),
-    };
-    assert!(provider.submit(request).await.is_err());
+    request.signature = credential.sign(&action_signature_payload(&request));
+    request
 }
 
 async fn issue(
@@ -246,6 +347,7 @@ struct InstrumentedProvider {
     max: Arc<AtomicUsize>,
     sessions: Arc<Mutex<HashSet<String>>>,
 }
+
 impl InstrumentedProvider {
     fn new() -> Self {
         Self {
@@ -265,11 +367,7 @@ impl InstrumentedProvider {
 
 #[async_trait]
 impl AttendanceProvider for InstrumentedProvider {
-    async fn authenticate(
-        &self,
-        user_id: &str,
-        secret: &str,
-    ) -> Result<String, deysis_trust_boundaries::provider::ProviderError> {
+    async fn authenticate(&self, user_id: &str, secret: &str) -> Result<String, ProviderError> {
         let current = self.active.fetch_add(1, Ordering::SeqCst) + 1;
         self.max.fetch_max(current, Ordering::SeqCst);
         tokio::time::sleep(std::time::Duration::from_millis(2)).await;
@@ -284,23 +382,25 @@ impl AttendanceProvider for InstrumentedProvider {
         }
         result
     }
+
     async fn register_device(
         &self,
         session: &str,
         identity: DeviceIdentity,
-    ) -> Result<(), deysis_trust_boundaries::provider::ProviderError> {
+    ) -> Result<(), ProviderError> {
         let result = self.inner.register_device(session, identity).await;
         if result.is_err() {
             self.finish(session);
         }
         result
     }
+
     async fn request_challenge(
         &self,
         session: &str,
-        device_id: uuid::Uuid,
+        device_id: Uuid,
         action: &str,
-    ) -> Result<String, deysis_trust_boundaries::provider::ProviderError> {
+    ) -> Result<String, ProviderError> {
         let result = self
             .inner
             .request_challenge(session, device_id, action)
@@ -310,13 +410,11 @@ impl AttendanceProvider for InstrumentedProvider {
         }
         result
     }
+
     async fn submit(
         &self,
         request: ActionRequest,
-    ) -> Result<
-        deysis_trust_boundaries::provider::ProviderResult,
-        deysis_trust_boundaries::provider::ProviderError,
-    > {
+    ) -> Result<deysis_trust_boundaries::ProviderResult, ProviderError> {
         let session = request.session_id.clone();
         let result = self.inner.submit(request).await;
         self.finish(&session);

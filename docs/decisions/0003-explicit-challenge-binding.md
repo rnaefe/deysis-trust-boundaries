@@ -6,7 +6,7 @@ A nonce that is merely fresh can still be misapplied if it is accepted in anothe
 
 ## Decision
 
-The mock stores user, device, session, action, and expiry with each challenge. Submission checks all bindings, verifies a signature over the action context plus location claim, and consumes the challenge once.
+The mock stores user, device, session, action, and expiry with each challenge. Submission checks all bindings, verifies a versioned length-prefixed signature payload over the complete request context, and atomically consumes the challenge only after every check succeeds.
 
 ## Alternatives considered
 

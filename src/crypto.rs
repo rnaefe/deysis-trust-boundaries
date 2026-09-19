@@ -9,6 +9,10 @@ use p256::ecdsa::{
     signature::{Signer, Verifier},
 };
 use serde::{Deserialize, Serialize};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
 use uuid::Uuid;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -32,12 +36,14 @@ pub struct EncryptedDeviceKey {
 #[derive(Clone)]
 pub struct KeyStore {
     cipher: Aes256Gcm,
+    encrypted: Arc<Mutex<HashMap<Uuid, EncryptedDeviceKey>>>,
 }
 
 impl KeyStore {
     pub fn new(key: [u8; 32]) -> Self {
         Self {
             cipher: Aes256Gcm::new_from_slice(&key).expect("valid AES key"),
+            encrypted: Arc::new(Mutex::new(HashMap::new())),
         }
     }
     pub fn generate(&self) -> Result<(DeviceCredential, EncryptedDeviceKey)> {
@@ -53,7 +59,36 @@ impl KeyStore {
             identity: identity.clone(),
             signing_key,
         };
-        Ok((credential.clone_for_test(), self.encrypt(&credential)?))
+        let encrypted = self.encrypt(&credential)?;
+        let replaced = self
+            .encrypted
+            .lock()
+            .expect("key store lock poisoned")
+            .insert(identity.id, encrypted.clone());
+        if replaced.is_some() {
+            bail!("device id collision")
+        }
+        Ok((credential.clone_for_test(), encrypted))
+    }
+
+    /// Loads a credential through the encrypted representation actually held by the store.
+    pub fn load(&self, device_id: Uuid) -> Result<DeviceCredential> {
+        let encrypted = self
+            .encrypted
+            .lock()
+            .expect("key store lock poisoned")
+            .get(&device_id)
+            .cloned()
+            .context("unknown device key")?;
+        self.decrypt(&encrypted)
+    }
+
+    pub fn remove(&self, device_id: Uuid) -> bool {
+        self.encrypted
+            .lock()
+            .expect("key store lock poisoned")
+            .remove(&device_id)
+            .is_some()
     }
     #[allow(deprecated)]
     pub fn encrypt(&self, credential: &DeviceCredential) -> Result<EncryptedDeviceKey> {
@@ -114,6 +149,11 @@ impl DeviceCredential {
         key.verify(message, &sig)
             .context("signature verification failed")
     }
+    pub fn validate_identity(identity: &DeviceIdentity) -> Result<()> {
+        VerifyingKey::from_sec1_bytes(&identity.public_key)
+            .context("invalid public key")
+            .map(|_| ())
+    }
     fn clone_for_test(&self) -> Self {
         Self {
             identity: self.identity.clone(),
@@ -130,7 +170,7 @@ mod tests {
     fn encrypted_private_key_round_trips_and_tampering_fails() {
         let store = KeyStore::new([9; 32]);
         let (credential, encrypted) = store.generate().unwrap();
-        let restored = store.decrypt(&encrypted).unwrap();
+        let restored = store.load(credential.identity.id).unwrap();
         assert_eq!(credential.identity.id, restored.identity.id);
         assert_eq!(
             credential.sign(b"independent-message"),
@@ -139,5 +179,7 @@ mod tests {
         let mut tampered = encrypted.clone();
         tampered.ciphertext[0] ^= 1;
         assert!(store.decrypt(&tampered).is_err());
+        assert!(store.remove(credential.identity.id));
+        assert!(store.load(credential.identity.id).is_err());
     }
 }

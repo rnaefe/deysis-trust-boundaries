@@ -3,8 +3,8 @@ set shell := ["sh", "-eu", "-c"]
 default: verify
 verify:
     cargo fmt --check
-    cargo test
-    cargo clippy --all-targets --all-features -- -D warnings
+    cargo test --locked
+    cargo clippy --locked --all-targets --all-features -- -D warnings
     git diff --check
 
 check: verify
