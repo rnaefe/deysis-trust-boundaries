@@ -1,5 +1,4 @@
 use anyhow::Result;
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -69,9 +68,6 @@ pub fn is_local_database(url: &str) -> bool {
         .unwrap_or(false)
 }
 
-#[allow(dead_code)]
-fn _timestamp(_: DateTime<Utc>) {}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -86,6 +82,7 @@ mod tests {
         .unwrap();
         assert!(!json.contains("password"));
         assert!(!json.contains("private_key"));
+        assert!(!json.contains("bearer"));
     }
     #[test]
     fn database_guard_allows_only_loopback() {

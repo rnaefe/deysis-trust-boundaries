@@ -1,57 +1,105 @@
 # Findings
 
-These findings distinguish observed client behavior from server-side conclusions. They are not exploit instructions.
+These are evidence-weighted trust-boundary observations, not exploit instructions. See the [evidence model](evidence-model.md) for the labels.
 
-## Client-reported location is not equivalent to physical presence
+## Finding — A client-reported location is not proof of physical presence
+
+### Evidence level
+
+**Observed**, with a **hypothetical** security consequence.
 
 ### Observation
 
-The studied workflow included a location claim in the client-driven action flow. A client can generally control the value it presents.
+The studied action flow included a location claim originating in the client-driven workflow.
 
-### Security implication
+### Interpretation
 
-A location value proves at most that a value was submitted. It is not, by itself, proof that the person or device was physically present.
+A client can present a value without that value independently proving where the person or device is.
+
+### Security boundary
+
+Client-controlled claim → provider/backend trust decision.
+
+### What this proves
+
+It proves that location was part of the client-visible action model and should be treated as an input claim.
 
 ### What this does not prove
 
-The observation does not prove that every server-side validation or secondary signal is absent. The public study does not claim a confirmed production weakness beyond the trust assumption.
+It does not prove that DEYSİS lacks server-side validation, corroborating signals, or policy controls.
 
-### Potential impact
+### Risk if relied upon incorrectly
 
-If relied on as the sole presence signal, the claim can reduce attendance integrity and weaken audit confidence.
+Using the claim as sole evidence of physical presence can weaken attendance integrity and audit confidence.
 
-### Recommended mitigation
+### Defensive recommendation
 
-Treat location as one signal. Bind action state server-side and corroborate with short-lived challenges, platform signals, proximity, instructor confirmation, or anomaly detection as appropriate.
+Treat location as one signal. Add server-authoritative session state and, where appropriate, proximity, attestation, instructor confirmation, or anomaly analysis.
 
-## Device identity is not physical presence
+## Finding — Device identity proves key possession, not presence
+
+### Evidence level
+
+**Observed**, with an **inferred** trust-boundary implication.
 
 ### Observation
 
 The client workflow used a persistent device identity and asymmetric signing concept.
 
-### Security implication
+### Interpretation
 
-Proof that a key can sign proves possession of that key, not that the expected device, person, or physical location is present.
+A valid signature demonstrates possession of the corresponding private key. It does not independently establish the expected person, hardware state, or physical location.
+
+### Security boundary
+
+Local device state → provider identity and presence decision.
+
+### What this proves
+
+It proves that device identity is a useful accountability and key-management concept.
 
 ### What this does not prove
 
-It does not establish that the provider accepts every device claim or lacks additional controls.
+It does not establish how strongly production binds a device to a user or what additional controls exist.
 
-### Recommended mitigation
+### Risk if relied upon incorrectly
 
-Use device identity as an accountability and key-management signal, not as a standalone presence proof. Consider attestation with explicit privacy and platform-dependence trade-offs.
+Treating a portable key as proof of presence collapses authentication, device identity, and presence into one assumption.
 
-## Challenge binding determines replay resistance
+### Defensive recommendation
+
+Keep those concepts separate. Consider attestation only as one layer, with explicit privacy and platform-dependence trade-offs.
+
+## Finding — Challenge freshness is not enough without context binding
+
+### Evidence level
+
+**Observed** challenge/nonce concept; **public mock** binding and replay behavior.
 
 ### Observation
 
-The analysis identified challenge/nonce concepts in the action lifecycle. The public mock makes binding explicit and testable.
+The analysis identified challenge-like state in the action lifecycle. The public implementation binds its invented challenge to user, device, session, action, and expiry.
 
-### Security implication
+### Interpretation
 
-Challenges that are not scoped to the user, device, session, action, and expiry can be replayed or moved across contexts.
+A fresh value can still be misapplied if it is accepted outside its intended context or more than once.
 
-### Recommended mitigation
+### Security boundary
 
-Use server-generated, short-lived, single-use challenges and consume them atomically with the action.
+Challenge issuance → signed action execution.
+
+### What this proves
+
+The mock rejects expiry, replay, invalid signatures, and context mismatches through executable tests.
+
+### What this does not prove
+
+The mock is not evidence that production uses the same bindings or validation policy.
+
+### Risk if relied upon incorrectly
+
+Weakly scoped challenges can create replay or cross-context acceptance risk.
+
+### Defensive recommendation
+
+Use short-lived, server-generated, single-use challenges and consume them atomically with the intended action.

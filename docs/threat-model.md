@@ -20,3 +20,22 @@ The attacker controls their own client, can inspect their own client traffic, ca
 | Worker → provider | Are provider failures distinguishable from success? |
 
 Risk classes include client-reported location, device identity assumptions, weak challenge binding, replay, long-lived credentials, insufficient anomaly detection, and weak auditability. Individual findings are labelled with their evidence level in [findings](findings.md).
+
+## Trust-boundary view
+
+```mermaid
+flowchart LR
+  U[Untrusted client claims] --> S[Trusted application state]
+  S --> D[(Durable queue state)]
+  D --> E[Ephemeral worker/session state]
+  E --> X[External provider boundary]
+  E --> K[Encrypted key material]
+```
+
+## Security invariants
+
+- Authentication is not physical presence.
+- Possession of a device key is not physical presence.
+- A client-originated location value is not independently verified location.
+- A challenge is valid only in its intended context and time window.
+- Queue persistence must not require serializing long-lived secrets.
