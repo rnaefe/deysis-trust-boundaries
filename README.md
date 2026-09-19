@@ -37,7 +37,7 @@ The mock provider has its own protocol and binds a short-lived, one-time challen
 
 ## Run the safe demo
 
-Requires Rust 1.85+.
+Requires Rust 1.97+.
 
 ```sh
 cargo run --bin trust-boundaries-demo
